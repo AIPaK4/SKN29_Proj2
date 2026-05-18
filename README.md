@@ -174,6 +174,18 @@ Train/Test 분리는 랜덤 분리가 아닌 **시간 기준 분리**를 적용�
 
 ## 모델 학습 및 성능
 
+### 모델 선정 근거
+
+본 프로젝트의 데이터는 항공사, 공항, 날씨, 스케줄 등 이질적인 출처의 피처가 혼재하는 정형(tabular) 데이터다.
+
+Grinsztajn et al. (2022, NeurIPS), *"Why do tree-based models still outperform deep learning on tabular data?"* ([참조](https://github.com/standing-o/Machine_Learning_Paper_Review/issues/19))에 따르면, 정형 데이터에서 트리 기반 모델이 딥러닝보다 우수한 이유로 세 가지를 제시한다.
+
+- 신경망은 불규칙한 타겟 함수 학습에 취약하다 (과도한 평활화).
+- MLP 계열 구조는 무관한 피처에 민감하게 반응한다.
+- 신경망은 회전 불변성을 가져 원본 피처 축의 방향 정보를 손실한다.
+
+이 근거를 바탕으로 XGBoost, LightGBM, RandomForest, Stacking을 주요 후보로 설정했다. 다만 해당 논문의 주장이 본 데이터셋에도 실제로 성립하는지 검증하기 위해, 2단계 구조의 FCNN을 별도로 설계하여 비교 실험을 진행했다. 실험 결과 트리 기반 모델(XGBoost ROC-AUC 0.8437)이 FCNN(ROC-AUC 0.6844)을 유의미하게 앞서, 논문의 주장이 본 데이터에도 부합함을 확인했다.
+
 ### 모델링 전략
 
 | 항목 | 내용 |
