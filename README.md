@@ -9,12 +9,13 @@
 1. [프로젝트 개요](#프로젝트-개요)
 2. [기술 스택](#기술-스택)
 3. [데이터셋](#데이터셋)
-4. [전처리 요약](#전처리-요약)
-5. [모델 학습 및 성능](#모델-학습-및-성능)
-6. [시스템 구조](#시스템-구조)
-7. [실행 방법](#실행-방법)
-8. [한계점](#한계점)
-9. [산출물](#산출물)
+4. [탐색적 데이터 분석](#탐색적-데이터-분석)
+5. [데이터 전처리](#데이터-전처리)
+6. [모델 학습 및 성능](#모델-학습-및-성능)
+7. [모델 해석](#모델-해석)
+8. [시스템 구조](#시스템-구조)
+9. [실행 방법](#실행-방법)
+10. [한계점](#한계점)
 
 ---
 
@@ -66,27 +67,85 @@
 | 최종 입력 피처 수 | 38개 |
 | Train / Test 분리 | 시간 기준 6.5 : 3.5 |
 
-Train/Test 분리는 랜덤 분리가 아닌 **시간 기준 분리**를 적용했다. 항공편 지연 예측은 과거 데이터로 미래 항공편을 예측하는 문제이므로, 미래 데이터 분포가 학습 과정에 유입되는 것을 방지하기 위함이다.
+Train/Test 분리는 랜덤 분리가 아닌 **시간 기준 분리**를 적용했다. 과거 데이터로 미래 항공편을 예측하는 실제 서비스 상황을 반영하기 위함이다. 집계 피처(평균 TaxiOut/TaxiIn 등)는 Train 기준으로만 계산하고 Test에 매핑하여 데이터 누수를 방지했다.
 
 ---
 
-## 전처리 요약
+## 탐색적 데이터 분석
+
+### 주요 발견사항
+
+| 발견사항 | 전처리 반영 |
+|---------|-----------|
+| 정상 항공편이 지연 항공편보다 훨씬 많음 (약 82.5% vs 17.5%) | 이진 분류 + 클래스 불균형 대응 |
+| 도착 지연 시간은 0 근처에 몰리고 긴 꼬리 분포 | 지연 시간 회귀 대신 15분 이상 여부 이진 분류 |
+| 출발/도착 지연률은 유사한 흐름 | 타겟은 서비스 목적에 맞게 도착 지연 기준으로 설정 |
+| 출발 시간대가 늦어질수록 지연 가능성 증가 | CRS 시간 sin/cos 인코딩 |
+| 강수량·적설량은 0 값이 대부분 | 연속형 값 외에 발생 여부 이진 피처 추가 생성 |
+| 실제 운항 후에만 알 수 있는 컬럼 다수 존재 | Leakage 컬럼 제거 |
+| 시간/거리/스케줄 계열 피처 간 중복성 존재 | VIF 분석 기반 피처 제거 |
+
+### 연도별 지연 추이
+
+2020년에 지연률이 크게 낮아졌다가 2021~2022년에 다시 증가했다. 항공편 지연이 전체 항공 수요, 운항 환경, 공항 혼잡도와 함께 변화함을 나타낸다.
+
+---
+
+## 데이터 전처리
 
 ### 핵심 원칙
 
 예측 시점(항공편 출발 전)에 알 수 없는 데이터는 입력 피처로 사용하지 않는다. `TaxiOut`, `TaxiIn`, `AirTime`, `ActualElapsedTime` 등 실제 운항 후 확정되는 컬럼은 직접 사용 대신 과거 평균 집계값으로 대체하거나 제거했다.
 
-### 주요 처리 단계
+### 결측값 처리
 
-| 단계 | 내용 |
-|------|------|
-| 결항/회항 제거 | 운항하지 않은 항공편 제거 |
-| Leakage 컬럼 제거 | 운항 후 확정되는 컬럼(`TaxiOut`, `AirTime` 등) 제거 |
-| 시간 순환 인코딩 | `CRSDepTime`, `CRSArrTime`, `Month`를 sin/cos로 변환 |
-| 집계 피처 생성 | 공항별·시간대별 평균 TaxiOut/TaxiIn, 노선 평균 비행시간 생성 (Train 기준 계산, Test에 매핑) |
-| 이진 피처 생성 | 강수/적설 발생 여부(`has_precip`, `has_snow`) |
-| 다중공선성 제거 | VIF 분석으로 중복 피처 12개 제거 |
-| 최종 피처 수 | 61개 → 79개(파생 포함) → 50개(1차 정리) → **38개** |
+| 결측 유형 | 대상 컬럼 예시 | 처리 방법 |
+|---------|------------|---------|
+| 결항/회항으로 인한 결측 | `ArrDelayMinutes`, `AirTime`, `ActualElapsedTime` | 결항/회항 항공편 전체 제거 |
+| 운항 후 확정되는 값 | `DepTime`, `TaxiOut`, `TaxiIn`, `WheelsOn`, `WheelsOff` | 최종 입력 피처에서 제거 |
+| 날씨 데이터 결측 | 출발지/도착지 날씨 변수 | 결측 행 제거 (결측률 낮고 전체 데이터 규모 큼) |
+| 스케줄 정보 결측 | `CRSElapsedTime`, `CRSDepTime`, `CRSArrTime` | 결측 또는 비정상 HHMM 행 제거 |
+
+### 이상값 처리
+
+도착 지연 시간은 long-tail 분포를 가지므로 무조건 제거하지 않고 분위수 기준으로 확인 후 실제 가능한 값은 유지했다. 극단적 지연도 실제 서비스에서 중요한 위험 신호일 수 있기 때문이다.
+
+### 피처 엔지니어링
+
+#### 시간 순환 인코딩
+
+`CRSDepTime`, `CRSArrTime`은 HHMM 형식 숫자이지만, 23:50과 00:10처럼 실제로 가까운 시각이 숫자상 멀리 표현되는 문제가 있다. 분 단위로 변환 후 sin/cos 인코딩을 적용했다.
+
+| 생성 피처 | 설명 |
+|---------|-----|
+| `CRSDep_sin`, `CRSDep_cos` | 예정 출발 시각의 하루 순환성 반영 |
+| `CRSArr_sin`, `CRSArr_cos` | 예정 도착 시각의 하루 순환성 반영 |
+| `month_sin`, `month_cos` | 12월과 1월이 이어지는 계절성 반영 |
+
+#### Leakage 방지를 위한 집계 피처
+
+직접 사용 불가한 컬럼을 과거 평균값으로 대체했다. 집계값은 Train 데이터에서만 계산하고 Test에 매핑한다.
+
+| 원본 컬럼 | 대체 피처 | 의미 |
+|---------|---------|-----|
+| `TaxiOut` | `origin_taxiout_mean` | 출발 공항의 평균 TaxiOut |
+| `TaxiOut` | `origin_hour_taxiout_mean` | 출발 공항 + 시간대별 평균 TaxiOut |
+| `TaxiIn` | `dest_taxiin_mean` | 도착 공항의 평균 TaxiIn |
+| `TaxiIn` | `dest_hour_taxiin_mean` | 도착 공항 + 시간대별 평균 TaxiIn |
+| `AirTime` | `route_airtime_mean` | 노선별 평균 비행시간 |
+
+#### 다중공선성 제거 (VIF 분석, 12개)
+
+`expected_elapsed_mean`, `expected_elapsed_hour_mean`, `schedule_buffer_hour`, `schedule_buffer`, `route_hour_airtime_mean`, `route_airtime_mean`, `origin_temp_mean_c`, `origin_temp_min_c`, `dest_temp_mean_c`, `dest_temp_min_c`, `Distance`, `Route`
+
+### 피처 변화 요약
+
+| 단계 | 피처 수 |
+|------|------:|
+| 원본 | 61개 |
+| 파생변수 추가 | 79개 |
+| 1차 정리 | 50개 |
+| 다중공선성 제거 후 최종 | **38개** |
 
 ### 최종 입력 피처 (38개)
 
@@ -101,9 +160,30 @@ Train/Test 분리는 랜덤 분리가 아닌 **시간 기준 분리**를 적용�
 | 공항 혼잡도 (4) | `origin_taxiout_mean`, `origin_hour_taxiout_mean`, `dest_taxiin_mean`, `dest_hour_taxiin_mean` |
 | 스케줄 여유도 (2) | `expected_elapsed_over_schedule`, `expected_elapsed_hour_over_schedule` |
 
+### 클래스 불균형 대응
+
+전체 데이터 기준 정시 약 82.5% / 지연 약 17.5%로 불균형이다. SMOTE 등 오버샘플링은 시간 기준 분리 구조를 깨뜨릴 수 있어 적용하지 않고, 모델 학습 단계에서 클래스 가중치를 부여하는 방식을 택했다.
+
+| 방법 | 적용 여부 | 근거 |
+|------|---------|-----|
+| SMOTE | 미적용 | 시간 기준 분리 구조 훼손 가능 |
+| 클래스 가중치 | 적용 | 지연 클래스 학습 신호 강화 |
+| 임계값 조정 | 운영 단계 고려 | 서비스 목적에 따라 Precision/Recall 균형 조정 |
+
 ---
 
 ## 모델 학습 및 성능
+
+### 모델링 전략
+
+| 항목 | 내용 |
+|------|------|
+| HPO | XGBoost, LightGBM, RandomForest — Optuna 70 trials (최적화 목표: ROC-AUC) |
+| Stacking 분리 | 학습 데이터 70/30 (베이스 학습 / 블렌딩 세트) |
+| FCNN | Early Stopping (patience=10, Val AUC 기준) |
+| 클래스 불균형 (트리) | 가중치 `√(n / (2 × count[c]))` |
+| 클래스 불균형 (FCNN) | `pos_weight = (n_neg / n_pos) × 1.5` |
+| 최종 모델 선정 기준 | Test ROC-AUC 최고값 |
 
 ### 후보 모델
 
@@ -115,10 +195,6 @@ Train/Test 분리는 랜덤 분리가 아닌 **시간 기준 분리**를 적용�
 | Stacking | 메타 앙상블 (XGB+LGBM+RF → LogisticRegression) | 각 베이스 모델 방식 동일 |
 | FCNN | 딥러닝 (2단계 구조) | `LabelEncoder` + Embedding Layer |
 
-HPO: XGBoost, LightGBM, RandomForest에 **Optuna 70 trials** 적용 (최적화 목표: ROC-AUC)
-
-클래스 불균형 대응: 트리 모델 — 클래스 가중치 `√(n / (2 × count[c]))` / FCNN — `pos_weight = (n_neg / n_pos) × 1.5`
-
 ### 전체 모델 성능 비교 (Test 기준, 929,965건)
 
 | 모델 | ROC-AUC | Avg Precision | Accuracy | 지연 Precision | 지연 Recall | 지연 F1 |
@@ -129,29 +205,73 @@ HPO: XGBoost, LightGBM, RandomForest에 **Optuna 70 trials** 적용 (최적화 �
 | RandomForest | 0.8278 | 0.5135 | 0.67 | 0.49 | 0.50 | 0.49 |
 | FCNN | 0.6844 | 0.5176 | — | 0.42 | **0.76** | **0.54** |
 
-### 최종 모델: XGBoost
+### 모델별 상세 결과
 
-ROC-AUC 0.8437로 전체 모델 중 최고 성능. Average Precision도 0.5356으로 가장 높다.
-단일 모델로 Stacking 대비 배포 및 유지보수가 간단하며, 범주형 변수 네이티브 지원으로 전처리 파이프라인이 단순하다.
+#### XGBoost
 
-**XGBoost 혼동 행렬 (Test 기준)**
+하이퍼파라미터 탐색 범위 (Optuna, 70 trials):
+
+| 파라미터 | 탐색 범위 |
+|---------|---------|
+| `n_estimators` | 100 ~ 1,000 |
+| `max_depth` | 3 ~ 10 |
+| `learning_rate` | 0.01 ~ 0.30 (log scale) |
+| `subsample` | 0.6 ~ 1.0 |
+| `colsample_bytree` | 0.6 ~ 1.0 |
+| `min_child_weight` | 1 ~ 10 |
+| `reg_lambda` | 0.001 ~ 10.0 (log scale) |
+
+혼동 행렬 (Test):
 
 | | 예측: 정시(0) | 예측: 지연(1) |
 |--|-------------|-------------|
 | **실제: 정시(0)** | 530,361 (TN) | 96,473 (FP) |
 | **실제: 지연(1)** | 183,728 (FN) | 119,403 (TP) |
 
-**운영 목적별 대안 모델**
+#### LightGBM
 
-| 목적 | 권장 모델 | 근거 |
-|------|---------|------|
-| 종합 성능 | XGBoost | ROC-AUC 0.8437 최고 |
-| 오경보 최소화 | Stacking | 지연 Precision 0.61 최고 |
-| 미탐지 최소화 | RandomForest | 지연 Recall 0.50 (트리 모델 중 최고) |
-| 지연 탐지 극대화 | FCNN | 지연 Recall 0.76 (ROC-AUC 저하 감수) |
+혼동 행렬 (Test):
 
-### FCNN 구조
+| | 예측: 정시(0) | 예측: 지연(1) |
+|--|-------------|-------------|
+| **실제: 정시(0)** | 525,651 (TN) | 101,183 (FP) |
+| **실제: 지연(1)** | 183,664 (FN) | 119,467 (TP) |
 
+#### RandomForest
+
+혼동 행렬 (Test):
+
+| | 예측: 정시(0) | 예측: 지연(1) |
+|--|-------------|-------------|
+| **실제: 정시(0)** | 469,988 (TN) | 156,846 (FP) |
+| **실제: 지연(1)** | 152,233 (FN) | 150,898 (TP) |
+
+지연 Recall 0.50으로 트리 모델 중 최고 — 미탐지 최소화가 목표일 경우 대안.
+
+#### Stacking
+
+구조:
+```
+베이스 레이어 (학습 데이터 70%):
+  XGBoost / LightGBM / RandomForest
+
+메타 레이어 (블렌딩 세트 30%):
+  LogisticRegression (C=1.0, max_iter=1000)
+  입력: [P_xgb, P_lgbm, P_rf] → 3차원 확률 벡터
+```
+
+혼동 행렬 (Test):
+
+| | 예측: 정시(0) | 예측: 지연(1) |
+|--|-------------|-------------|
+| **실제: 정시(0)** | 574,238 (TN) | 52,596 (FP) |
+| **실제: 지연(1)** | 221,220 (FN) | 81,911 (TP) |
+
+지연 Precision 0.61로 전체 모델 중 최고 — 오경보 최소화가 목표일 경우 대안. 단, 지연 Recall 0.27로 전체 최저.
+
+#### FCNN
+
+구조:
 ```
 [1단계 - Static Branch]
   입력: 수치형 12개 + 범주형 임베딩 4종 (총 60-dim)
@@ -165,9 +285,67 @@ ROC-AUC 0.8437로 전체 모델 중 최고 성능. Average Precision도 0.5356�
   Linear(86→256) → BatchNorm → ReLU → Dropout(0.3)
   Linear(256→128) → BatchNorm → ReLU → Dropout(0.3)
   Linear(128→64) → Linear(64→1)
+  (Sigmoid 없음 — BCEWithLogitsLoss 학습, 예측 시 외부에서 sigmoid 적용)
 ```
 
-학습 설정: BCEWithLogitsLoss, AdamW (lr=1e-3, weight_decay=1e-4), batch_size=2048, Early Stopping (patience=10, Val AUC 기준)
+학습 설정:
+
+| 파라미터 | 값 |
+|---------|---|
+| 손실 함수 | BCEWithLogitsLoss |
+| `pos_weight` | `(n_neg / n_pos) × 1.5` |
+| 옵티마이저 | AdamW (lr=1e-3, weight_decay=1e-4) |
+| 배치 크기 | 2,048 |
+| 최대 Epoch | 300 |
+| Early Stopping | patience=10 (Val AUC 기준) |
+| LR Scheduler | ReduceLROnPlateau (mode="max", patience=3) |
+
+최적 임계값 0.52 기준 분류 보고서:
+
+| 클래스 | Precision | Recall | F1 |
+|--------|-----------|--------|-----|
+| 정시(0) | 0.81 | 0.48 | 0.61 |
+| 지연(1) | 0.42 | 0.76 | 0.54 |
+
+지연 Recall 0.76으로 트리 모델 대비 높으나 ROC-AUC 0.6844로 낮다.
+
+### 최종 모델: XGBoost
+
+ROC-AUC 0.8437, Average Precision 0.5356으로 전체 모델 중 최고 성능. 단일 모델로 Stacking 대비 배포 및 유지보수가 간단하며, 범주형 변수 네이티브 지원으로 전처리 파이프라인이 단순하다.
+
+**운영 목적별 대안 모델**
+
+| 목적 | 권장 모델 | 근거 |
+|------|---------|-----|
+| 종합 성능 | XGBoost | ROC-AUC 0.8437 최고 |
+| 오경보 최소화 | Stacking | 지연 Precision 0.61 최고 |
+| 미탐지 최소화 | RandomForest | 지연 Recall 0.50 (트리 모델 중 최고) |
+| 지연 탐지 극대화 | FCNN | 지연 Recall 0.76 (ROC-AUC 저하 감수) |
+
+---
+
+## 모델 해석
+
+### 정적/동적 피처 분리 설계
+
+| 구분 | 설명 | 예시 |
+|------|-----|-----|
+| 정적 (Static) | 비행 출발 전 확정, 당일 변화 없음 | 스케줄, 노선, 항공사 |
+| 동적 (Dynamic) | 운항 당일 수집 | 기상 조건, 공항 혼잡도 |
+
+트리 기반 모델은 정적·동적 피처를 단일 입력 벡터로 결합하여 처리한다. FCNN만 2단계 구조로 정적 피처를 먼저 인코딩한 뒤 동적 피처와 결합한다.
+
+### 데이터 드리프트 모니터링
+
+- 감지 기준: ROC-AUC < 0.80 → 재학습 트리거
+
+| 모델 | 증분 학습 방식 |
+|------|-------------|
+| XGBoost | `xgb_model=model.get_booster()` 로 이어 학습 |
+| LightGBM | `init_model=model` 로 이어 학습 |
+| RandomForest | `warm_start=True` + 트리 50개 추가 |
+
+증분 학습 후에도 ROC-AUC < 0.80이면 전체 재학습 권고.
 
 ---
 
@@ -244,16 +422,3 @@ python -m streamlit run front/app.py
 | 공항 API | 실시간 공항 운영 데이터 미연동, 임의 데이터로 실험 |
 | 미탐지율 | XGBoost 기준 지연 Recall 0.39 — 실제 지연의 61%를 정시로 예측 |
 | 드리프트 검증 | Data Drift 실험을 위한 미래 데이터 미확보 |
-
-드리프트 감지 기준: ROC-AUC < 0.80 → 재학습 트리거
-증분 학습: XGBoost (`xgb_model` 이어 학습), LightGBM (`init_model` 이어 학습), RandomForest (`warm_start=True`)
-
----
-
-## 산출물
-
-| 문서 | 경로 |
-|------|------|
-| 데이터 전처리 결과서 | [reports/1_ai_preprocessing_result_report.md](reports/1_ai_preprocessing_result_report.md) |
-| 모델 학습 결과서 | [reports/2_model_training_report.md](reports/2_model_training_report.md) |
-| 모델 메타데이터 | [reports/3_model_metadata.md](reports/3_model_metadata.md) |
